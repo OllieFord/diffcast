@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
 import polars as pl
 from entsoe import EntsoePandasClient
 from tqdm import tqdm
@@ -11,6 +12,16 @@ from tqdm import tqdm
 from diffcast.data.schema import ENTSOE_AREA_CODES, ZONES
 
 logger = logging.getLogger(__name__)
+
+
+def _to_pandas_timestamp(dt: datetime) -> pd.Timestamp:
+    """Convert datetime to timezone-aware pandas Timestamp."""
+    return pd.Timestamp(dt, tz="UTC")
+
+
+def _normalize_timestamps(index: pd.DatetimeIndex) -> list[datetime]:
+    """Convert pandas DatetimeIndex to UTC naive datetime list."""
+    return [ts.to_pydatetime().replace(tzinfo=None) for ts in index.tz_convert("UTC")]
 
 
 class ENTSOEClient:
@@ -41,8 +52,8 @@ class ENTSOEClient:
             DataFrame with columns: timestamp, price_eur_mwh
         """
         area_code = ENTSOE_AREA_CODES[zone]
-        start_pd = start.strftime("%Y%m%d")
-        end_pd = end.strftime("%Y%m%d")
+        start_pd = _to_pandas_timestamp(start)
+        end_pd = _to_pandas_timestamp(end)
 
         try:
             prices = self.client.query_day_ahead_prices(
@@ -51,13 +62,13 @@ class ENTSOEClient:
                 end=end_pd,
             )
             df = pl.DataFrame({
-                "timestamp": prices.index.to_pydatetime(),
-                "price_eur_mwh": prices.values,
+                "timestamp": _normalize_timestamps(prices.index),
+                "price_eur_mwh": prices.values.astype(float),
             })
             return df
         except Exception as e:
             logger.warning(f"Failed to fetch prices for {zone}: {e}")
-            return pl.DataFrame(schema={"timestamp": pl.Datetime, "price_eur_mwh": pl.Float64})
+            return pl.DataFrame(schema={"timestamp": pl.Datetime("us"), "price_eur_mwh": pl.Float64})
 
     def fetch_load(
         self,
@@ -78,8 +89,8 @@ class ENTSOEClient:
             DataFrame with columns: timestamp, load_mw
         """
         area_code = ENTSOE_AREA_CODES[zone]
-        start_pd = start.strftime("%Y%m%d")
-        end_pd = end.strftime("%Y%m%d")
+        start_pd = _to_pandas_timestamp(start)
+        end_pd = _to_pandas_timestamp(end)
 
         try:
             if forecast:
@@ -94,14 +105,19 @@ class ENTSOEClient:
                     start=start_pd,
                     end=end_pd,
                 )
+            # Handle both Series and DataFrame returns
+            if hasattr(load, 'values'):
+                load_values = load.values.flatten().astype(float)
+            else:
+                load_values = load.astype(float).values
             df = pl.DataFrame({
-                "timestamp": load.index.to_pydatetime(),
-                "load_mw": load.values,
+                "timestamp": _normalize_timestamps(load.index),
+                "load_mw": load_values,
             })
             return df
         except Exception as e:
             logger.warning(f"Failed to fetch load for {zone}: {e}")
-            return pl.DataFrame(schema={"timestamp": pl.Datetime, "load_mw": pl.Float64})
+            return pl.DataFrame(schema={"timestamp": pl.Datetime("us"), "load_mw": pl.Float64})
 
     def fetch_generation_by_type(
         self,
@@ -120,8 +136,8 @@ class ENTSOEClient:
             DataFrame with columns: timestamp, wind_mw, solar_mw, hydro_mw
         """
         area_code = ENTSOE_AREA_CODES[zone]
-        start_pd = start.strftime("%Y%m%d")
-        end_pd = end.strftime("%Y%m%d")
+        start_pd = _to_pandas_timestamp(start)
+        end_pd = _to_pandas_timestamp(end)
 
         try:
             gen = self.client.query_generation(
@@ -134,22 +150,22 @@ class ENTSOEClient:
             solar_cols = [c for c in gen.columns if "Solar" in str(c)]
             hydro_cols = [c for c in gen.columns if "Hydro" in str(c)]
 
-            wind_mw = gen[wind_cols].sum(axis=1) if wind_cols else 0
-            solar_mw = gen[solar_cols].sum(axis=1) if solar_cols else 0
-            hydro_mw = gen[hydro_cols].sum(axis=1) if hydro_cols else 0
+            wind_mw = gen[wind_cols].sum(axis=1).astype(float) if wind_cols else pd.Series([0.0] * len(gen), index=gen.index)
+            solar_mw = gen[solar_cols].sum(axis=1).astype(float) if solar_cols else pd.Series([0.0] * len(gen), index=gen.index)
+            hydro_mw = gen[hydro_cols].sum(axis=1).astype(float) if hydro_cols else pd.Series([0.0] * len(gen), index=gen.index)
 
             df = pl.DataFrame({
-                "timestamp": gen.index.to_pydatetime(),
-                "wind_mw": wind_mw.values if hasattr(wind_mw, "values") else [0] * len(gen),
-                "solar_mw": solar_mw.values if hasattr(solar_mw, "values") else [0] * len(gen),
-                "hydro_mw": hydro_mw.values if hasattr(hydro_mw, "values") else [0] * len(gen),
+                "timestamp": _normalize_timestamps(gen.index),
+                "wind_mw": wind_mw.values,
+                "solar_mw": solar_mw.values,
+                "hydro_mw": hydro_mw.values,
             })
             return df
         except Exception as e:
             logger.warning(f"Failed to fetch generation for {zone}: {e}")
             return pl.DataFrame(
                 schema={
-                    "timestamp": pl.Datetime,
+                    "timestamp": pl.Datetime("us"),
                     "wind_mw": pl.Float64,
                     "solar_mw": pl.Float64,
                     "hydro_mw": pl.Float64,
