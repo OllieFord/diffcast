@@ -140,9 +140,10 @@ def main(
     logger.info("Starting training...")
     trainer.fit(model, data_module, ckpt_path=checkpoint)
 
-    # Test
-    logger.info("Running test evaluation...")
-    trainer.test(model, data_module, ckpt_path="best")
+    # Test (skip in fast_dev_run mode)
+    if not fast_dev_run:
+        logger.info("Running test evaluation...")
+        trainer.test(model, data_module, ckpt_path="best")
 
     logger.info("Training complete!")
 
